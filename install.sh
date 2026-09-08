@@ -131,201 +131,115 @@ generate_random_service_name() {
 }
 
 # ========== REGIONS ==========
-# The old version hard-coded a list containing regions that may be blocked by
-# the project's Organization Policy. We now discover Cloud Run regions and
-# filter them against the EFFECTIVE gcp.resourceLocations policy.
-#
-# Policy values can be:
-#   - an exact region, e.g. us-central1
-#   - a region group, e.g. in:us-central1-locations
-#   - a broad location group, e.g. in:us-locations
-#
-# Plain "US" is a multi-region value and is intentionally NOT interpreted as
-# "every us-* region". This avoids selecting a region that the policy does not
-# actually permit.
+# Show every Cloud Run region returned by Google Cloud and let the user choose.
+# Project/org location policies are intentionally not used to hide regions here:
+# the project/lab is responsible for enforcing its own allowed locations.
+# If a selected region is not permitted, Google Cloud will reject the deploy.
 
 declare -A REGION_NAMES=(
-  [us-central1]="US🇺🇸"
-  [us-east1]="US🇺🇸"
-  [us-east4]="US🇺🇸"
-  [us-west1]="US🇺🇸"
-  [us-west2]="US🇺🇸"
-  [us-west3]="US🇺🇸"
-  [us-west4]="US🇺🇸"
-  [europe-west1]="Belgium🇧🇪"
-  [europe-west2]="United Kingdom🇬🇧"
-  [europe-west3]="Germany🇩🇪"
-  [europe-west4]="Netherlands🇳🇱"
-  [europe-west6]="Switzerland🇨🇭"
-  [europe-west8]="Italy🇮🇹"
-  [europe-west9]="France🇫🇷"
-  [europe-west10]="Berlin🇩🇪"
-  [europe-west12]="Turin🇮🇹"
-  [europe-north1]="Finland🇫🇮"
-  [europe-central2]="Poland🇵🇱"
-  [asia-east1]="Taiwan🇹🇼"
-  [asia-east2]="Hong Kong🇭🇰"
-  [asia-northeast1]="Tokyo🇯🇵"
-  [asia-northeast2]="Osaka🇯🇵"
-  [asia-northeast3]="Seoul🇰🇷"
-  [asia-south1]="Mumbai🇮🇳"
-  [asia-southeast1]="Singapore🇸🇬"
-  [asia-southeast2]="Jakarta🇮🇩"
-  [australia-southeast1]="Sydney🇦🇺"
-  [australia-southeast2]="Melbourne🇦🇺"
+  # Africa
+  [africa-south1]="🇿🇦 South Africa — Johannesburg"
+
+  # Asia
+  [asia-east1]="🇹🇼 Taiwan — Taiwan"
+  [asia-east2]="🇭🇰 Hong Kong — Hong Kong"
+  [asia-northeast1]="🇯🇵 Japan — Tokyo"
+  [asia-northeast2]="🇯🇵 Japan — Osaka"
+  [asia-northeast3]="🇰🇷 South Korea — Seoul"
+  [asia-south1]="🇮🇳 India — Mumbai"
+  [asia-south2]="🇮🇳 India — Delhi"
+  [asia-southeast1]="🇸🇬 Singapore — Singapore"
+  [asia-southeast2]="🇮🇩 Indonesia — Jakarta"
+  [asia-southeast3]="🇹🇭 Thailand — Bangkok"
+  [asia-southeast4]="🇲🇾 Malaysia — Kuala Lumpur"
+
+  # Australia
+  [australia-southeast1]="🇦🇺 Australia — Sydney"
+  [australia-southeast2]="🇦🇺 Australia — Melbourne"
+
+  # Europe
+  [europe-central2]="🇵🇱 Poland — Warsaw"
+  [europe-north1]="🇫🇮 Finland — Hamina"
+  [europe-north2]="🇸🇪 Sweden — Stockholm"
+  [europe-southwest1]="🇪🇸 Spain — Madrid"
+  [europe-west1]="🇧🇪 Belgium — St. Ghislain"
+  [europe-west2]="🇬🇧 United Kingdom — London"
+  [europe-west3]="🇩🇪 Germany — Frankfurt"
+  [europe-west4]="🇳🇱 Netherlands — Eemshaven"
+  [europe-west6]="🇨🇭 Switzerland — Zurich"
+  [europe-west8]="🇮🇹 Italy — Milan"
+  [europe-west9]="🇫🇷 France — Paris"
+  [europe-west10]="🇩🇪 Germany — Berlin"
+  [europe-west12]="🇮🇹 Italy — Turin"
+
+  # Middle East
+  [me-central1]="🇶🇦 Qatar — Doha"
+  [me-central2]="🇸🇦 Saudi Arabia — Dammam"
+  [me-west1]="🇮🇱 Israel — Tel Aviv"
+
+  # North America
+  [northamerica-northeast1]="🇨🇦 Canada — Montreal"
+  [northamerica-northeast2]="🇨🇦 Canada — Toronto"
+  [northamerica-south1]="🇲🇽 Mexico — Mexico"
+
+  # South America
+  [southamerica-east1]="🇧🇷 Brazil — São Paulo"
+  [southamerica-west1]="🇨🇱 Chile — Santiago"
+
+  # United States
+  [us-central1]="🇺🇸 USA — Iowa"
+  [us-east1]="🇺🇸 USA — South Carolina"
+  [us-east4]="🇺🇸 USA — Northern Virginia"
+  [us-east5]="🇺🇸 USA — Columbus"
+  [us-east7]="🇺🇸 USA — Alabama"
+  [us-south1]="🇺🇸 USA — Dallas"
+  [us-west1]="🇺🇸 USA — Oregon"
+  [us-west2]="🇺🇸 USA — Los Angeles"
+  [us-west3]="🇺🇸 USA — Salt Lake City"
+  [us-west4]="🇺🇸 USA — Las Vegas"
+  [us-west8]="🇺🇸 USA — Phoenix"
 )
 
 get_region_name() { echo "${REGION_NAMES[$1]:-$1}"; }
 
-# Return success when REGION is allowed by the effective location policy.
-policy_allows_region() {
-  local region="$1"
-  local policy_json="$2"
-
-  # No readable policy => don't make an incorrect assumption here.
-  [ -n "$policy_json" ] || return 1
-
-  python3 - "$region" "$policy_json" <<'PY'
-import json
-import sys
-
-region = sys.argv[1]
-raw = sys.argv[2]
-
-try:
-    policy = json.loads(raw)
-except Exception:
-    sys.exit(1)
-
-# Depending on gcloud/API version, listPolicy may be exposed directly or
-# nested under spec. Support both shapes.
-lp = policy.get("listPolicy") or policy.get("spec", {}).get("rules", [{}])[0].get("values", {})
-allowed = lp.get("allowedValues", []) if isinstance(lp, dict) else []
-
-# Some API representations expose allowedValues under a rules entry.
-if not allowed:
-    rules = policy.get("spec", {}).get("rules", [])
-    for rule in rules:
-        values = rule.get("values", {})
-        if isinstance(values, dict) and values.get("allowedValues"):
-            allowed = values["allowedValues"]
-            break
-
-if not allowed:
-    # No allowedValues means this policy may be unrestricted or use another
-    # representation. Do not guess that the region is allowed.
-    sys.exit(1)
-
-def exact_group_matches(value, region):
-    value = value.lower()
-    region = region.lower()
-
-    if value == region:
-        return True
-
-    # Google location groups for a specific region contain that region's
-    # location(s), including the region itself for this purpose.
-    if value == f"in:{region}-locations":
-        return True
-
-    # Broad geographic location groups.
-    broad_groups = {
-        "in:us-locations": ("us-",),
-        "in:europe-locations": ("europe-",),
-        "in:asia-locations": ("asia-",),
-        "in:australia-locations": ("australia-",),
-        "in:northamerica-locations": ("us-", "northamerica-"),
-        "in:southamerica-locations": ("southamerica-",),
-        "in:africa-locations": ("africa-",),
-        "in:me-locations": ("me-",),
-    }
-
-    prefixes = broad_groups.get(value)
-    if prefixes and region.startswith(prefixes):
-        return True
-
-    return False
-
-for value in allowed:
-    if exact_group_matches(str(value), region):
-        sys.exit(0)
-
-sys.exit(1)
-PY
-}
-
-load_allowed_regions() {
+load_cloud_run_regions() {
   SUGGESTED_REGIONS=()
-
-  if ! command -v python3 >/dev/null 2>&1; then
-    print_warning "python3 is required to read the effective gcp.resourceLocations policy."
-    return 1
-  fi
-
-  local policy_json
-  policy_json="$(gcloud org-policies describe constraints/gcp.resourceLocations \
-    --effective \
-    --project="$PROJECT" \
-    --format=json 2>/dev/null || true)"
-
-  if [ -z "$policy_json" ]; then
-    print_warning "Could not read the effective gcp.resourceLocations policy."
-    return 1
-  fi
 
   local available_regions
   available_regions="$(gcloud run regions list --platform=managed --format='value(name)' 2>/dev/null || true)"
 
   if [ -z "$available_regions" ]; then
-    print_warning "Could not retrieve Cloud Run regions."
+    print_error "Could not retrieve the Cloud Run region list."
+    print_info "Run: gcloud run regions list --platform=managed"
     return 1
   fi
 
-  local r
   while IFS= read -r r; do
     [ -n "$r" ] || continue
-    if policy_allows_region "$r" "$policy_json"; then
-      SUGGESTED_REGIONS+=("$r")
-    fi
+    SUGGESTED_REGIONS+=("$r")
   done <<< "$available_regions"
 
-  if [ ${#SUGGESTED_REGIONS[@]} -eq 0 ]; then
-    return 1
-  fi
-
-  return 0
+  [ "${#SUGGESTED_REGIONS[@]}" -gt 0 ]
 }
 
 show_regions() {
   echo ""
-  echo "🌍 Cloud Run Regions Allowed by Project Policy:"
+  echo "🌍 Cloud Run Regions:"
   echo ""
   local i=1
   for r in "${SUGGESTED_REGIONS[@]}"; do
-    printf "%2d) %s (%s)\n" "$i" "$r" "$(get_region_name "$r")"
+    printf "%2d) %-42s (%s)\n" "$i" "$(get_region_name "$r")" "$r"
     ((i++))
   done
+  echo ""
 }
 
 validate_region() {
   local requested="$1"
 
-  # Exact Cloud Run availability check.
-  if ! gcloud run regions list --platform=managed --format='value(name)' 2>/dev/null |
-       grep -Fxq "$requested"; then
-    print_error "Region '$requested' is not a valid Cloud Run region."
+  if ! printf '%s\n' "${SUGGESTED_REGIONS[@]}" | grep -Fxq "$requested"; then
+    print_error "Region '$requested' is not available in the Cloud Run region list."
     return 1
-  fi
-
-  # If policy data is available, enforce it before deployment.
-  if [ "${EFFECTIVE_POLICY_JSON:-}" ]; then
-    if ! policy_allows_region "$requested" "$EFFECTIVE_POLICY_JSON"; then
-      print_error "Region '$requested' is blocked by the effective gcp.resourceLocations policy."
-      print_info "Choose one of the regions shown by the script."
-      return 1
-    fi
-  else
-    print_warning "Effective location policy could not be read; Cloud Run will validate it during deployment."
   fi
 
   return 0
@@ -394,23 +308,11 @@ WSPATH="${WSPATH:-/ws}"
 [[ "$WSPATH" == /* ]] || WSPATH="/$WSPATH"
 
 # ========== REGION ==========
-# Load the effective policy after PROJECT has been established by
-# enable_required_apis(), then only show regions that are actually allowed.
-EFFECTIVE_POLICY_JSON="$(gcloud org-policies describe constraints/gcp.resourceLocations \
-  --effective \
-  --project="$PROJECT" \
-  --format=json 2>/dev/null || true)"
-
-if [ -n "$EFFECTIVE_POLICY_JSON" ] && command -v python3 >/dev/null 2>&1; then
-  if ! load_allowed_regions; then
-    print_warning "No policy-allowed Cloud Run region list could be generated."
-    # Keep a small safe fallback. It is still validated below.
-    SUGGESTED_REGIONS=(us-central1)
-  fi
-else
-  print_warning "Could not inspect the effective location policy."
-  print_info "The selected region will still be checked against Cloud Run."
-  SUGGESTED_REGIONS=(us-central1)
+# Always show the complete Cloud Run region list returned by gcloud.
+# We do not inspect/filter Organization Policy here; the lab/project itself
+# will enforce any location restrictions when deployment is attempted.
+if ! load_cloud_run_regions; then
+  exit 1
 fi
 
 if [ "${INTERACTIVE}" = true ] && [ -z "${REGION:-}" ]; then
@@ -527,4 +429,3 @@ print_info "This link is shown to you only — nothing is sent anywhere else."
 
 # Send to YOUR Telegram bot only, if configured
 send_telegram "<b>AMANI-MORA deployment</b>%0AService: ${SERVICE}%0AHost: ${HOST}%0AProtocol: ${PROTO^^}%0ALink: ${SHARE_LINK}"
-
