@@ -36,8 +36,7 @@ print_section() {
   echo -e "${BRIGHT_BLUE}${BOLD}────────────────────────────────────────${NC}"
 }
 
-# ========== CLEANUP (temp files only — this script never deletes itself,
-# the repo, or any of your files, and never unsets your shell env) ==========
+# ========== CLEANUP ==========
 TMP_CONFIG=""
 cleanup_temp() {
   [ -n "$TMP_CONFIG" ] && rm -f "$TMP_CONFIG" 2>/dev/null || true
@@ -132,22 +131,204 @@ generate_random_service_name() {
 }
 
 # ========== REGIONS ==========
-SUGGESTED_REGIONS=(europe-west4 europe-west1 europe-west3 us-central1 us-east1 us-east4 us-west1)
+# The old version hard-coded a list containing regions that may be blocked by
+# the project's Organization Policy. We now discover Cloud Run regions and
+# filter them against the EFFECTIVE gcp.resourceLocations policy.
+#
+# Policy values can be:
+#   - an exact region, e.g. us-central1
+#   - a region group, e.g. in:us-central1-locations
+#   - a broad location group, e.g. in:us-locations
+#
+# Plain "US" is a multi-region value and is intentionally NOT interpreted as
+# "every us-* region". This avoids selecting a region that the policy does not
+# actually permit.
+
 declare -A REGION_NAMES=(
-  [us-central1]="US🇺🇸" [us-east1]="US🇺🇸" [us-east4]="US🇺🇸" [us-west1]="US🇺🇸"
-  [europe-west1]="Belgium🇧🇪" [europe-west3]="Germany🇩🇪" [europe-west4]="Netherlands🇳🇱"
+  [us-central1]="US🇺🇸"
+  [us-east1]="US🇺🇸"
+  [us-east4]="US🇺🇸"
+  [us-west1]="US🇺🇸"
+  [us-west2]="US🇺🇸"
+  [us-west3]="US🇺🇸"
+  [us-west4]="US🇺🇸"
+  [europe-west1]="Belgium🇧🇪"
+  [europe-west2]="United Kingdom🇬🇧"
+  [europe-west3]="Germany🇩🇪"
+  [europe-west4]="Netherlands🇳🇱"
+  [europe-west6]="Switzerland🇨🇭"
+  [europe-west8]="Italy🇮🇹"
+  [europe-west9]="France🇫🇷"
+  [europe-west10]="Berlin🇩🇪"
+  [europe-west12]="Turin🇮🇹"
+  [europe-north1]="Finland🇫🇮"
+  [europe-central2]="Poland🇵🇱"
+  [asia-east1]="Taiwan🇹🇼"
+  [asia-east2]="Hong Kong🇭🇰"
+  [asia-northeast1]="Tokyo🇯🇵"
+  [asia-northeast2]="Osaka🇯🇵"
+  [asia-northeast3]="Seoul🇰🇷"
+  [asia-south1]="Mumbai🇮🇳"
+  [asia-southeast1]="Singapore🇸🇬"
+  [asia-southeast2]="Jakarta🇮🇩"
+  [australia-southeast1]="Sydney🇦🇺"
+  [australia-southeast2]="Melbourne🇦🇺"
 )
+
 get_region_name() { echo "${REGION_NAMES[$1]:-$1}"; }
+
+# Return success when REGION is allowed by the effective location policy.
+policy_allows_region() {
+  local region="$1"
+  local policy_json="$2"
+
+  # No readable policy => don't make an incorrect assumption here.
+  [ -n "$policy_json" ] || return 1
+
+  python3 - "$region" "$policy_json" <<'PY'
+import json
+import sys
+
+region = sys.argv[1]
+raw = sys.argv[2]
+
+try:
+    policy = json.loads(raw)
+except Exception:
+    sys.exit(1)
+
+# Depending on gcloud/API version, listPolicy may be exposed directly or
+# nested under spec. Support both shapes.
+lp = policy.get("listPolicy") or policy.get("spec", {}).get("rules", [{}])[0].get("values", {})
+allowed = lp.get("allowedValues", []) if isinstance(lp, dict) else []
+
+# Some API representations expose allowedValues under a rules entry.
+if not allowed:
+    rules = policy.get("spec", {}).get("rules", [])
+    for rule in rules:
+        values = rule.get("values", {})
+        if isinstance(values, dict) and values.get("allowedValues"):
+            allowed = values["allowedValues"]
+            break
+
+if not allowed:
+    # No allowedValues means this policy may be unrestricted or use another
+    # representation. Do not guess that the region is allowed.
+    sys.exit(1)
+
+def exact_group_matches(value, region):
+    value = value.lower()
+    region = region.lower()
+
+    if value == region:
+        return True
+
+    # Google location groups for a specific region contain that region's
+    # location(s), including the region itself for this purpose.
+    if value == f"in:{region}-locations":
+        return True
+
+    # Broad geographic location groups.
+    broad_groups = {
+        "in:us-locations": ("us-",),
+        "in:europe-locations": ("europe-",),
+        "in:asia-locations": ("asia-",),
+        "in:australia-locations": ("australia-",),
+        "in:northamerica-locations": ("us-", "northamerica-"),
+        "in:southamerica-locations": ("southamerica-",),
+        "in:africa-locations": ("africa-",),
+        "in:me-locations": ("me-",),
+    }
+
+    prefixes = broad_groups.get(value)
+    if prefixes and region.startswith(prefixes):
+        return True
+
+    return False
+
+for value in allowed:
+    if exact_group_matches(str(value), region):
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+load_allowed_regions() {
+  SUGGESTED_REGIONS=()
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    print_warning "python3 is required to read the effective gcp.resourceLocations policy."
+    return 1
+  fi
+
+  local policy_json
+  policy_json="$(gcloud org-policies describe constraints/gcp.resourceLocations \
+    --effective \
+    --project="$PROJECT" \
+    --format=json 2>/dev/null || true)"
+
+  if [ -z "$policy_json" ]; then
+    print_warning "Could not read the effective gcp.resourceLocations policy."
+    return 1
+  fi
+
+  local available_regions
+  available_regions="$(gcloud run regions list --platform=managed --format='value(name)' 2>/dev/null || true)"
+
+  if [ -z "$available_regions" ]; then
+    print_warning "Could not retrieve Cloud Run regions."
+    return 1
+  fi
+
+  local r
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    if policy_allows_region "$r" "$policy_json"; then
+      SUGGESTED_REGIONS+=("$r")
+    fi
+  done <<< "$available_regions"
+
+  if [ ${#SUGGESTED_REGIONS[@]} -eq 0 ]; then
+    return 1
+  fi
+
+  return 0
+}
 
 show_regions() {
   echo ""
-  echo "🌍 Suggested Cloud Run Regions:"
+  echo "🌍 Cloud Run Regions Allowed by Project Policy:"
   echo ""
   local i=1
   for r in "${SUGGESTED_REGIONS[@]}"; do
     printf "%2d) %s (%s)\n" "$i" "$r" "$(get_region_name "$r")"
     ((i++))
   done
+}
+
+validate_region() {
+  local requested="$1"
+
+  # Exact Cloud Run availability check.
+  if ! gcloud run regions list --platform=managed --format='value(name)' 2>/dev/null |
+       grep -Fxq "$requested"; then
+    print_error "Region '$requested' is not a valid Cloud Run region."
+    return 1
+  fi
+
+  # If policy data is available, enforce it before deployment.
+  if [ "${EFFECTIVE_POLICY_JSON:-}" ]; then
+    if ! policy_allows_region "$requested" "$EFFECTIVE_POLICY_JSON"; then
+      print_error "Region '$requested' is blocked by the effective gcp.resourceLocations policy."
+      print_info "Choose one of the regions shown by the script."
+      return 1
+    fi
+  else
+    print_warning "Effective location policy could not be read; Cloud Run will validate it during deployment."
+  fi
+
+  return 0
 }
 
 # ========== PRESET SELECTION ==========
@@ -213,13 +394,46 @@ WSPATH="${WSPATH:-/ws}"
 [[ "$WSPATH" == /* ]] || WSPATH="/$WSPATH"
 
 # ========== REGION ==========
+# Load the effective policy after PROJECT has been established by
+# enable_required_apis(), then only show regions that are actually allowed.
+EFFECTIVE_POLICY_JSON="$(gcloud org-policies describe constraints/gcp.resourceLocations \
+  --effective \
+  --project="$PROJECT" \
+  --format=json 2>/dev/null || true)"
+
+if [ -n "$EFFECTIVE_POLICY_JSON" ] && command -v python3 >/dev/null 2>&1; then
+  if ! load_allowed_regions; then
+    print_warning "No policy-allowed Cloud Run region list could be generated."
+    # Keep a small safe fallback. It is still validated below.
+    SUGGESTED_REGIONS=(us-central1)
+  fi
+else
+  print_warning "Could not inspect the effective location policy."
+  print_info "The selected region will still be checked against Cloud Run."
+  SUGGESTED_REGIONS=(us-central1)
+fi
+
 if [ "${INTERACTIVE}" = true ] && [ -z "${REGION:-}" ]; then
   show_regions
   read -rp "Select region [1-${#SUGGESTED_REGIONS[@]}] (default: 1): " REGION_IDX
   REGION_IDX="${REGION_IDX:-1}"
-  REGION="${SUGGESTED_REGIONS[$((REGION_IDX-1))]:-us-central1}"
+
+  if [[ "$REGION_IDX" =~ ^[0-9]+$ ]] &&
+     [ "$REGION_IDX" -ge 1 ] &&
+     [ "$REGION_IDX" -le "${#SUGGESTED_REGIONS[@]}" ]; then
+    REGION="${SUGGESTED_REGIONS[$((REGION_IDX-1))]}"
+  else
+    print_error "Invalid region selection."
+    exit 1
+  fi
 fi
-REGION="${REGION:-us-central1}"
+
+REGION="${REGION:-${SUGGESTED_REGIONS[0]:-us-central1}}"
+
+if ! validate_region "$REGION"; then
+  exit 1
+fi
+
 print_success "Region: $REGION ($(get_region_name "$REGION"))"
 
 # ========== SERVICE NAME ==========
@@ -232,8 +446,7 @@ CURRENT_SERVICE="$SERVICE"
 
 UUID="${UUID:-$(cat /proc/sys/kernel/random/uuid)}"
 
-# ========== OPTIONAL EXPIRATION NOTE (informational only — this script
-# does not enforce it automatically; it's just a reminder for you) ==========
+# ========== OPTIONAL EXPIRATION NOTE ==========
 if [ "${INTERACTIVE}" = true ] && [ -z "${TIMEEND:-}" ]; then
   read -rp "⏳ Planned teardown time, for your own notes (optional, e.g. '7d' or blank): " TIMEEND
 fi
@@ -313,4 +526,5 @@ echo ""
 print_info "This link is shown to you only — nothing is sent anywhere else."
 
 # Send to YOUR Telegram bot only, if configured
-send_telegram "<b>AMANI-MORA deployment</b>%0AService: ${SERVICE}%0AHost: ${HOST}%0AProtocol: ${PROTO^^}%0ALink: ${SHAR
+send_telegram "<b>AMANI-MORA deployment</b>%0AService: ${SERVICE}%0AHost: ${HOST}%0AProtocol: ${PROTO^^}%0ALink: ${SHARE_LINK}"
+
