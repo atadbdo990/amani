@@ -1,4 +1,4 @@
-Enter{
+{
   "log": {
     "loglevel": "warning"
   },
