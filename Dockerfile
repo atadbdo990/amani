@@ -1,4 +1,4 @@
-here# AMANI-MORA — Xray (VLESS/VMESS/TROJAN) container image
+# AMANI-MORA — Xray (VLESS/VMESS/TROJAN) container image
 FROM golang:1.20-bullseye AS builder
 WORKDIR /src
 
