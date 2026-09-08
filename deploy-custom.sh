@@ -1,4 +1,4 @@
-here#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # AMANI-MORA — flexible deployment script for Xray on Cloud Run
