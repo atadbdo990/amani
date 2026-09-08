@@ -1,4 +1,4 @@
-Enter#!/bin/bash
+#!/bin/bash
 # AMANI-MORA — bare-metal/VPS entrypoint (used when NOT running inside the
 # Docker image, e.g. on a VPS where xray is already installed on PATH).
 set -eu
