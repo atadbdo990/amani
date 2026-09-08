@@ -216,8 +216,69 @@ load_cloud_run_regions() {
 
   while IFS= read -r r; do
     [ -n "$r" ] || continue
+
+    # gcloud can return either a bare region (e.g. us-central1)
+    # or a fully-qualified location resource
+    # (e.g. projects/PROJECT/locations/us-central1).
+    # Keep only the actual Cloud Run region code.
+    if [[ "$r" == */locations/* ]]; then
+      r="${r##*/locations/}"
+    elif [[ "$r" == */* ]]; then
+      r="${r##*/}"
+    fi
+
+    [ -n "$r" ] || continue
     SUGGESTED_REGIONS+=("$r")
   done <<< "$available_regions"
+
+  # Remove duplicates while preserving the order returned by gcloud.
+  if [ "${#SUGGESTED_REGIONS[@]}" -gt 0 ]; then
+    local -a unique_regions=()
+    local seen=""
+    for r in "${SUGGESTED_REGIONS[@]}"; do
+      case $'\n'"${seen}"$'\n' in
+        *$'\n'"${r}"$'\n'*) continue ;;
+      esac
+      unique_regions+=("$r")
+      seen+="${r}"$'\n'
+    done
+    SUGGESTED_REGIONS=("${unique_regions[@]}")
+  fi
+
+  # Requested priority order: keep these locations at the top.
+  # All other Cloud Run regions follow afterwards in Google's returned order.
+  local -a priority_regions=(
+    "us-central1"
+    "europe-west1"
+    "europe-west8"
+    "europe-west4"
+  )
+  local -a ordered_regions=()
+  local p r found
+
+  for p in "${priority_regions[@]}"; do
+    found=false
+    for r in "${SUGGESTED_REGIONS[@]}"; do
+      if [ "$r" = "$p" ]; then
+        ordered_regions+=("$r")
+        found=true
+        break
+      fi
+    done
+  done
+
+  for r in "${SUGGESTED_REGIONS[@]}"; do
+    found=false
+    for p in "${priority_regions[@]}"; do
+      if [ "$r" = "$p" ]; then
+        found=true
+        break
+      fi
+    done
+    [ "$found" = true ] || ordered_regions+=("$r")
+  done
+
+  SUGGESTED_REGIONS=("${ordered_regions[@]}")
 
   [ "${#SUGGESTED_REGIONS[@]}" -gt 0 ]
 }
@@ -429,3 +490,4 @@ print_info "This link is shown to you only — nothing is sent anywhere else."
 
 # Send to YOUR Telegram bot only, if configured
 send_telegram "<b>AMANI-MORA deployment</b>%0AService: ${SERVICE}%0AHost: ${HOST}%0AProtocol: ${PROTO^^}%0ALink: ${SHARE_LINK}"
+
